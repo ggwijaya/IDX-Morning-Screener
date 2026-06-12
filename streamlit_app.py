@@ -62,6 +62,16 @@ BADGES = [
     ("combo4", "MFI<20 + VOL SPIKE", "b-red"),
 ]
 
+# Pilihan kombinasi sinyal di sidebar; key harus cocok dengan dict `sig`
+# di analyze_one dan BADGES di atas.
+COMBOS = [
+    ("combo1", "Kombo 1 · RSI ≤ 30 + Stochastic %K < 20"),
+    ("combo2", "Kombo 2 · Sentuh Bollinger bawah + OBV naik"),
+    ("combo3", "Kombo 3 · Divergensi RSI + histogram MACD memendek"),
+    ("combo4", "Kombo 4 · MFI < 20 + lonjakan volume"),
+]
+COMBO_KEYS = tuple(k for k, _ in COMBOS)
+
 CSS = """
 <style>
 .stApp {background:#eef0ec;}
@@ -152,7 +162,8 @@ def bullish_divergence(close: pd.Series, r: pd.Series,
     return bool(c_recent.min() < c_prior.min() and r_recent.min() > r_prior.min())
 
 
-def analyze_one(df: pd.DataFrame, min_price: float) -> dict | None:
+def analyze_one(df: pd.DataFrame, min_price: float,
+                active: tuple = COMBO_KEYS) -> dict | None:
     df = df.dropna(subset=["Close"]).copy()
     if len(df) < MIN_BARS:
         return None
@@ -206,7 +217,7 @@ def analyze_one(df: pd.DataFrame, min_price: float) -> dict | None:
         "combo4": pd.notna(mfi_now) and pd.notna(vol_ratio)
                   and mfi_now < 20 and vol_ratio >= 1.8,
     }
-    score = 2.5 * sum(sig.values())
+    score = 2.5 * sum(bool(sig[k]) for k in active)
     return {
         "close": close, "ret1": ret(1), "ret5": ret(5), "ret20": ret(20),
         "rsi": rsi_now, "stoch": k_now, "mfi": mfi_now,
@@ -215,11 +226,12 @@ def analyze_one(df: pd.DataFrame, min_price: float) -> dict | None:
     }
 
 
-def build_screen(prices: dict[str, pd.DataFrame], top_n: int, min_price: float) -> pd.DataFrame:
+def build_screen(prices: dict[str, pd.DataFrame], top_n: int, min_price: float,
+                 active: tuple = COMBO_KEYS) -> pd.DataFrame:
     rows = []
     for code, df in prices.items():
         try:
-            res = analyze_one(df, min_price)
+            res = analyze_one(df, min_price, active)
         except Exception:
             continue
         if res:
@@ -231,8 +243,9 @@ def build_screen(prices: dict[str, pd.DataFrame], top_n: int, min_price: float) 
     return table.sort_values(["score", "liq"], ascending=[False, False]).reset_index(drop=True)
 
 
-def signal_text(r) -> str:
-    return " · ".join(label for key, label, _ in BADGES if r.get(key)) or "—"
+def signal_text(r, active: tuple = COMBO_KEYS) -> str:
+    return " · ".join(label for key, label, _ in BADGES
+                      if key in active and r.get(key)) or "—"
 
 
 # ----------------------------------------------------------------------------
@@ -251,13 +264,14 @@ def _pct(v):
     return f'<span class="{cls}">{v:+.1f}</span>'
 
 
-def picks_table_html(picks: pd.DataFrame) -> str:
+def picks_table_html(picks: pd.DataFrame, active: tuple = COMBO_KEYS) -> str:
     head = ("<tr><th class='l'>Kode</th><th>Close</th><th>1D%</th><th>20D%</th>"
             "<th>RSI</th><th>Vol×</th><th class='l'>Sinyal</th><th>Skor</th></tr>")
     rows = []
     for _, r in picks.iterrows():
         badges = "".join(f'<span class="bd {cls}">{label}</span>'
-                         for key, label, cls in BADGES if r.get(key))
+                         for key, label, cls in BADGES
+                         if key in active and r.get(key))
         rows.append(
             f"<tr><td class='code'>{r['code']}</td>"
             f"<td class='num'>{_fmt(r['close'], 0)}</td>"
@@ -315,7 +329,18 @@ def main():
         st.markdown("### ⚙️ Pengaturan")
         top_n = st.slider("Jumlah saham terlikuid", 50, 300, 200, step=25,
                           help="Diranking dari rata-rata nilai transaksi 20 hari (data aktual)")
-        threshold = st.slider("Ambang skor Top Picks", 0.0, 10.0, 5.0, step=0.5)
+        combo_sel = st.multiselect(
+            "Kombinasi sinyal dipakai", [label for _, label in COMBOS],
+            default=[label for _, label in COMBOS],
+            help="Skor & Top Picks hanya menghitung kombinasi yang dipilih (+2,5 per kombinasi)",
+        )
+        active = tuple(k for k, label in COMBOS if label in combo_sel)
+        if not active:
+            st.caption("⚠️ Tidak ada kombinasi dipilih — memakai keempatnya.")
+            active = COMBO_KEYS
+        max_score = 2.5 * len(active)
+        threshold = st.slider("Ambang skor Top Picks", 0.0, max_score,
+                              min(5.0, max_score), step=0.5)
         min_price = st.number_input("Harga minimum (Rp)", 50, 10000, 50, step=50)
         with st.expander("Universe kustom"):
             uni_text = st.text_area("Kode saham (tanpa .JK)", " ".join(UNIVERSE),
@@ -356,7 +381,7 @@ def main():
         st.stop()
 
     failed = len(symbols) - len(prices)
-    table = build_screen(prices, top_n, float(min_price))
+    table = build_screen(prices, top_n, float(min_price), active)
     if table.empty:
         st.warning("Tidak ada saham yang lolos filter dasar (harga minimum / panjang data).")
         st.stop()
@@ -376,7 +401,7 @@ def main():
     st.caption("Kandidat rebound: saham jenuh jual yang mulai menunjukkan tanda "
                "akumulasi / pembalikan momentum menurut aturan skor.")
     if len(picks):
-        st.markdown(picks_table_html(picks), unsafe_allow_html=True)
+        st.markdown(picks_table_html(picks, active), unsafe_allow_html=True)
     else:
         st.info("Belum ada saham yang lolos ambang skor. Turunkan ambang di sidebar.")
 
@@ -389,7 +414,7 @@ def main():
         "RSI": table["rsi"], "Stoch": table["stoch"], "MFI": table["mfi"],
         "Vol×": table["vol_ratio"],
         "Liq (Rp M)": table["liq"] / 1e9,
-        "Sinyal": table.apply(signal_text, axis=1),
+        "Sinyal": table.apply(lambda r: signal_text(r, active), axis=1),
         "Skor": table["score"],
     })
     st.dataframe(
@@ -404,7 +429,8 @@ def main():
             "MFI": st.column_config.NumberColumn(format="%.0f"),
             "Vol×": st.column_config.NumberColumn(format="%.1f"),
             "Liq (Rp M)": st.column_config.NumberColumn(format="%.1f"),
-            "Skor": st.column_config.ProgressColumn(format="%.1f", min_value=0, max_value=10),
+            "Skor": st.column_config.ProgressColumn(format="%.1f", min_value=0,
+                                                    max_value=max_score),
         },
     )
     st.download_button(
@@ -414,7 +440,7 @@ def main():
 
     # ---------- Catatan ----------
     st.caption(
-        "**Skor**: tiap kombinasi +2,5 (maks 10) · "
+        "**Skor**: tiap kombinasi terpilih +2,5 (maks 2,5 × jumlah kombinasi dipilih) · "
         "**Kombo 1** RSI ≤ 30 & Stochastic %K < 20 (jenuh jual ganda) · "
         "**Kombo 2** low menyentuh Bollinger bawah (20, 2σ, ≤5 hari) & OBV naik (akumulasi) · "
         "**Kombo 3** divergensi bullish RSI & histogram MACD memendek (momentum berbalik) · "

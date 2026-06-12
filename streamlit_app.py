@@ -31,6 +31,12 @@ MIN_BARS = 120        # minimal candle agar dianalisis
 LIQ_WINDOW = 20       # window rata-rata nilai transaksi (hari)
 CACHE_TTL = 4 * 3600  # cache data 4 jam (data EOD, tak perlu lebih sering)
 
+# Backtest running text: definisi tetap, tidak mengikuti setting sidebar.
+BT_THRESHOLD = 5.0    # skor minimal (semua 4 kombo) agar masuk top pick H-1
+BT_HIT_PCT = 1.0      # HIT bila high hari berikutnya >= close H-1 + 1%
+BT_MIN_PRICE = 50.0
+BT_TOP_N = 200
+
 # Universe kandidat (~195 saham IDX yang umumnya aktif). Bisa basi karena
 # merger/delisting/IPO — saham tanpa data otomatis dilewati, dan ranking
 # likuiditas dihitung dari data AKTUAL. Bisa di-override lewat sidebar.
@@ -95,6 +101,15 @@ table.picks td.num {font-family:monospace;text-align:right;}
 table.picks td.code {font-family:monospace;font-weight:700;color:#0a4646;}
 table.picks td.sig {white-space:normal;}
 .up{color:#137a52}.down{color:#b23a3a}.score{font-weight:700;color:#0e5d5d}
+.marquee {overflow:hidden;background:#0e3a3a;border:1px solid #b8862b55;
+  border-radius:8px;margin:2px 0 10px;}
+.marquee-inner {display:inline-block;white-space:nowrap;padding:6px 0;
+  animation-name:mq;animation-timing-function:linear;animation-iteration-count:infinite;}
+.marquee-inner:hover {animation-play-state:paused;}
+.mq-item {font-family:monospace;font-size:12.5px;font-weight:600;
+  color:#dfe9e6;margin:0 18px;}
+.mq-hit{color:#3ddc97}.mq-fail{color:#ff8080}
+@keyframes mq {from{transform:translateX(0)}to{transform:translateX(-50%)}}
 </style>
 """
 
@@ -243,6 +258,44 @@ def build_screen(prices: dict[str, pd.DataFrame], top_n: int, min_price: float,
     return table.sort_values(["score", "liq"], ascending=[False, False]).reset_index(drop=True)
 
 
+def backtest_yesterday(prices: dict[str, pd.DataFrame]) -> list[tuple[str, bool]]:
+    """Hitung ulang Top Picks per H-1 (hanya data sampai H-1, tanpa look-ahead),
+    lalu nilai HIT/FAIL dari bar terakhir: HIT bila high menyentuh
+    close H-1 + BT_HIT_PCT%. Saham yang bar terakhirnya basi (suspensi/delisting)
+    dikecualikan agar evaluasinya satu hari perdagangan yang sama."""
+    clean = {code: df.dropna(subset=["Close"]) for code, df in prices.items()}
+    clean = {code: df for code, df in clean.items() if len(df) > MIN_BARS}
+    if not clean:
+        return []
+    latest = max(df.index[-1] for df in clean.values())
+    hist = {code: df.iloc[:-1] for code, df in clean.items() if df.index[-1] == latest}
+    table = build_screen(hist, BT_TOP_N, BT_MIN_PRICE)
+    if table.empty:
+        return []
+    picks = table[table["score"] >= BT_THRESHOLD]
+    out = []
+    for _, r in picks.iterrows():
+        hi = clean[r["code"]].iloc[-1]["High"]
+        hit = pd.notna(hi) and float(hi) >= r["close"] * (1 + BT_HIT_PCT / 100)
+        out.append((r["code"], bool(hit)))
+    return out
+
+
+def marquee_html(results: list[tuple[str, bool]]) -> str:
+    if results:
+        items = "".join(
+            f'<span class="mq-item">{code} '
+            f'<span class="{"mq-hit" if ok else "mq-fail"}">{"HIT" if ok else "FAIL"}</span></span>'
+            for code, ok in results
+        )
+    else:
+        items = '<span class="mq-item">TIDAK ADA TOP PICK KEMARIN</span>'
+    dur = max(12, 3 * max(len(results), 1))
+    # Konten digandakan supaya loop translateX(-50%) mulus tanpa jeda.
+    return (f'<div class="marquee"><div class="marquee-inner" '
+            f'style="animation-duration:{dur}s">{items}{items}</div></div>')
+
+
 def signal_text(r, active: tuple = COMBO_KEYS) -> str:
     return " · ".join(label for key, label, _ in BADGES
                       if key in active and r.get(key)) or "—"
@@ -379,6 +432,17 @@ def main():
             "**Tarik ulang data** di sidebar."
         )
         st.stop()
+
+    # ---------- Running text: backtest top picks H-1 ----------
+    bt = backtest_yesterday(prices)
+    st.markdown(marquee_html(bt), unsafe_allow_html=True)
+    if bt:
+        n_hit = sum(ok for _, ok in bt)
+        st.caption(
+            f"Backtest top picks hari sebelumnya (skor ≥ {BT_THRESHOLD:g}, 4 kombo): "
+            f"{n_hit}/{len(bt)} HIT — HIT bila high hari berikutnya ≥ "
+            f"+{BT_HIT_PCT:g}% dari close saat pick."
+        )
 
     failed = len(symbols) - len(prices)
     table = build_screen(prices, top_n, float(min_price), active)

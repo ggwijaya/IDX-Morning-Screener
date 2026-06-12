@@ -11,6 +11,9 @@ berjalan sebagai web app Streamlit dengan data riil dari Yahoo Finance
   MACD memendek, (4) MFI < 20 + lonjakan volume (kelelahan jual)
 - Skor komposit + bagian **Top Picks** untuk pengecekan tiap pagi;
   kombinasi yang dipakai bisa dipilih (1–4) lewat sidebar
+- Running text backtest: top picks hari sebelumnya (skor ≥ 5, 4 kombo) dinilai
+  **HIT** (hijau) bila high hari berikutnya ≥ +1% dari close saat pick, selain itu
+  **FAIL** (merah) — tanpa look-ahead, sinyal dihitung dari data sampai H-1 saja
 - Tabel lengkap yang bisa di-sort, export CSV, universe kustom lewat sidebar
 - Cache data 4 jam (dibagi ke semua pengunjung) supaya Yahoo tidak di-spam
 

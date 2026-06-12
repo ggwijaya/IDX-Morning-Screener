@@ -28,7 +28,7 @@ import pandas as pd
 BATCH = 50            # ukuran batch download yfinance
 PERIOD = "2y"         # periode data harian
 MIN_BARS = 120        # minimal candle agar dianalisis
-LIQ_WINDOW = 60       # window median nilai transaksi (hari)
+LIQ_WINDOW = 20       # window rata-rata nilai transaksi (hari)
 CACHE_TTL = 4 * 3600  # cache data 4 jam (data EOD, tak perlu lebih sering)
 
 # Universe kandidat (~195 saham IDX yang umumnya aktif). Bisa basi karena
@@ -56,15 +56,21 @@ CDIA COIN DAAZ BMTR DEWA
 """.split()
 
 BADGES = [
-    ("breakout", "BREAKOUT 20D", "b-gold"),
-    ("near52w", "DEKAT 52W HIGH", "b-gold"),
-    ("golden", "GOLDEN CROSS", "b-teal"),
-    ("macd", "MACD CROSS", "b-teal"),
-    ("trend", "TREN NAIK", "b-teal"),
-    ("volspike", "VOL SPIKE", "b-vio"),
-    ("overbought", "RSI>80", "b-red"),
-    ("below200", "DI BAWAH MA200", "b-red"),
+    ("combo1", "RSI+STOCH JENUH JUAL", "b-teal"),
+    ("combo2", "BB BAWAH + OBV NAIK", "b-gold"),
+    ("combo3", "DIVERGENSI RSI+MACD", "b-vio"),
+    ("combo4", "MFI<20 + VOL SPIKE", "b-red"),
 ]
+
+# Pilihan kombinasi sinyal di sidebar; key harus cocok dengan dict `sig`
+# di analyze_one dan BADGES di atas.
+COMBOS = [
+    ("combo1", "Kombo 1 · RSI ≤ 30 + Stochastic %K < 20"),
+    ("combo2", "Kombo 2 · Sentuh Bollinger bawah + OBV naik"),
+    ("combo3", "Kombo 3 · Divergensi RSI + histogram MACD memendek"),
+    ("combo4", "Kombo 4 · MFI < 20 + lonjakan volume"),
+]
+COMBO_KEYS = tuple(k for k, _ in COMBOS)
 
 CSS = """
 <style>
@@ -114,24 +120,62 @@ def macd(close: pd.Series):
     return line, signal
 
 
-def crossed_above_within(a: pd.Series, b: pd.Series, lookback: int) -> bool:
-    diff = (a - b).dropna()
-    if len(diff) < lookback + 1:
+def stoch_k(close: pd.Series, high: pd.Series, low: pd.Series,
+            n: int = 14, smooth: int = 3) -> pd.Series:
+    ll = low.rolling(n).min()
+    hh = high.rolling(n).max()
+    k = 100 * (close - ll) / (hh - ll).replace(0, np.nan)
+    return k.rolling(smooth).mean()
+
+
+def bollinger_lower(close: pd.Series, n: int = 20, k: float = 2.0) -> pd.Series:
+    mid = close.rolling(n).mean()
+    std = close.rolling(n).std()
+    return mid - k * std
+
+
+def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    direction = np.sign(close.diff()).fillna(0.0)
+    return (direction * volume).cumsum()
+
+
+def mfi(high: pd.Series, low: pd.Series, close: pd.Series,
+        volume: pd.Series, n: int = 14) -> pd.Series:
+    tp = (high + low + close) / 3
+    flow = tp * volume
+    delta = tp.diff()
+    pos = flow.where(delta > 0, 0.0).rolling(n).sum()
+    neg = flow.where(delta < 0, 0.0).rolling(n).sum()
+    ratio = pos / neg.replace(0, np.nan)
+    return 100 - 100 / (1 + ratio)
+
+
+def bullish_divergence(close: pd.Series, r: pd.Series,
+                       recent: int = 10, prior: int = 20) -> bool:
+    """Harga membuat low lebih rendah dari periode sebelumnya, tapi RSI tidak."""
+    if len(close) < recent + prior:
         return False
-    window = diff.iloc[-(lookback + 1):]
-    above = window > 0
-    return bool(above.iloc[-1] and (~above.iloc[:-1]).any())
+    c_recent, c_prior = close.iloc[-recent:], close.iloc[-(recent + prior):-recent]
+    r_recent, r_prior = r.iloc[-recent:], r.iloc[-(recent + prior):-recent]
+    if r_recent.isna().all() or r_prior.isna().all():
+        return False
+    return bool(c_recent.min() < c_prior.min() and r_recent.min() > r_prior.min())
 
 
-def analyze_one(df: pd.DataFrame, min_price: float) -> dict | None:
+def analyze_one(df: pd.DataFrame, min_price: float,
+                active: tuple = COMBO_KEYS) -> dict | None:
     df = df.dropna(subset=["Close"]).copy()
     if len(df) < MIN_BARS:
         return None
-    c, h, v = df["Close"], df["High"], df["Volume"].fillna(0)
+    c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"].fillna(0)
 
-    sma20, sma50, sma200 = c.rolling(20).mean(), c.rolling(50).mean(), c.rolling(200).mean()
     r = rsi(c)
     macd_line, macd_sig = macd(c)
+    hist = macd_line - macd_sig
+    k = stoch_k(c, h, l)
+    bb_low = bollinger_lower(c)
+    obv_line = obv(c, v)
+    mfi_line = mfi(h, l, c, v)
     vol_sma20 = v.rolling(20).mean()
 
     close = float(c.iloc[-1])
@@ -139,8 +183,7 @@ def analyze_one(df: pd.DataFrame, min_price: float) -> dict | None:
         return None
 
     last = lambda s: float(s.iloc[-1]) if pd.notna(s.iloc[-1]) else np.nan
-    s20, s50, s200 = last(sma20), last(sma50), last(sma200)
-    rsi_now = last(r)
+    rsi_now, k_now, mfi_now = last(r), last(k), last(mfi_line)
     vol_ratio = float(v.iloc[-1] / vol_sma20.iloc[-1]) if vol_sma20.iloc[-1] else np.nan
 
     def ret(n):
@@ -149,44 +192,46 @@ def analyze_one(df: pd.DataFrame, min_price: float) -> dict | None:
         prev = c.iloc[-1 - n]
         return (close / prev - 1) * 100 if prev else np.nan
 
-    value = (c * v).tail(LIQ_WINDOW)
-    liq = float(value.median()) if len(value) else 0.0
+    # Hari tanpa transaksi (volume 0/NaN dari Yahoo) dikecualikan agar
+    # rata-rata tidak tertarik ke bawah oleh baris hantu/libur.
+    value = (c * v)
+    value = value[v > 0].tail(LIQ_WINDOW)
+    liq = float(value.mean()) if len(value) else 0.0
 
-    prior20_high = h.iloc[-21:-1].max() if len(h) >= 21 else np.nan
-    hi52 = c.rolling(252, min_periods=120).max().iloc[-1]
+    # Kombo 2: low menyentuh/menembus Bollinger bawah dalam 5 hari terakhir,
+    # sementara OBV naik dibanding 5 hari lalu (volume akumulasi masuk).
+    bb_touch = bool(((l - bb_low).tail(5) <= 0).any()) if pd.notna(bb_low.iloc[-1]) else False
+    obv_rising = len(obv_line) > 5 and obv_line.iloc[-1] > obv_line.iloc[-6]
+
+    # Kombo 3: histogram MACD masih negatif tapi memendek 2 bar berturut-turut.
+    hist_clean = hist.dropna()
+    hist_shrinking = (
+        len(hist_clean) >= 3 and hist_clean.iloc[-1] < 0
+        and hist_clean.iloc[-1] > hist_clean.iloc[-2] > hist_clean.iloc[-3]
+    )
 
     sig = {
-        "trend":    pd.notna(s20) and pd.notna(s50) and close > s20 > s50,
-        "above200": pd.notna(s200) and close > s200,
-        "breakout": pd.notna(prior20_high) and close > float(prior20_high),
-        "near52w":  pd.notna(hi52) and close >= 0.97 * float(hi52),
-        "golden":   crossed_above_within(sma50, sma200, 10),
-        "macd":     crossed_above_within(macd_line, macd_sig, 3),
-        "volspike": pd.notna(vol_ratio) and vol_ratio >= 1.8,
-        "rsi_ok":   pd.notna(rsi_now) and 50 <= rsi_now <= 70,
-        "overbought": pd.notna(rsi_now) and rsi_now > 80,
-        "below200": pd.notna(s200) and close < s200,
+        "combo1": pd.notna(rsi_now) and pd.notna(k_now) and rsi_now <= 30 and k_now < 20,
+        "combo2": bb_touch and obv_rising,
+        "combo3": bullish_divergence(c, r) and hist_shrinking,
+        "combo4": pd.notna(mfi_now) and pd.notna(vol_ratio)
+                  and mfi_now < 20 and vol_ratio >= 1.8,
     }
-    r20 = ret(20)
-    score = (
-        2.0 * sig["trend"] + 1.0 * sig["above200"] + 2.0 * sig["breakout"]
-        + 1.5 * sig["near52w"] + 1.5 * sig["golden"] + 1.0 * sig["macd"]
-        + 1.0 * sig["volspike"] + 1.0 * sig["rsi_ok"]
-        + (0.5 if (pd.notna(r20) and r20 > 0) else 0.0)
-        - 1.0 * sig["overbought"] - 1.0 * sig["below200"]
-    )
+    score = 2.5 * sum(bool(sig[k]) for k in active)
     return {
-        "close": close, "ret1": ret(1), "ret5": ret(5), "ret20": r20,
-        "rsi": rsi_now, "vol_ratio": vol_ratio, "liq": liq,
+        "close": close, "ret1": ret(1), "ret5": ret(5), "ret20": ret(20),
+        "rsi": rsi_now, "stoch": k_now, "mfi": mfi_now,
+        "vol_ratio": vol_ratio, "liq": liq,
         "last_date": df.index[-1], "score": round(score, 1), **sig,
     }
 
 
-def build_screen(prices: dict[str, pd.DataFrame], top_n: int, min_price: float) -> pd.DataFrame:
+def build_screen(prices: dict[str, pd.DataFrame], top_n: int, min_price: float,
+                 active: tuple = COMBO_KEYS) -> pd.DataFrame:
     rows = []
     for code, df in prices.items():
         try:
-            res = analyze_one(df, min_price)
+            res = analyze_one(df, min_price, active)
         except Exception:
             continue
         if res:
@@ -198,8 +243,9 @@ def build_screen(prices: dict[str, pd.DataFrame], top_n: int, min_price: float) 
     return table.sort_values(["score", "liq"], ascending=[False, False]).reset_index(drop=True)
 
 
-def signal_text(r) -> str:
-    return " · ".join(label for key, label, _ in BADGES if r.get(key)) or "—"
+def signal_text(r, active: tuple = COMBO_KEYS) -> str:
+    return " · ".join(label for key, label, _ in BADGES
+                      if key in active and r.get(key)) or "—"
 
 
 # ----------------------------------------------------------------------------
@@ -218,13 +264,14 @@ def _pct(v):
     return f'<span class="{cls}">{v:+.1f}</span>'
 
 
-def picks_table_html(picks: pd.DataFrame) -> str:
+def picks_table_html(picks: pd.DataFrame, active: tuple = COMBO_KEYS) -> str:
     head = ("<tr><th class='l'>Kode</th><th>Close</th><th>1D%</th><th>20D%</th>"
             "<th>RSI</th><th>Vol×</th><th class='l'>Sinyal</th><th>Skor</th></tr>")
     rows = []
     for _, r in picks.iterrows():
         badges = "".join(f'<span class="bd {cls}">{label}</span>'
-                         for key, label, cls in BADGES if r.get(key))
+                         for key, label, cls in BADGES
+                         if key in active and r.get(key))
         rows.append(
             f"<tr><td class='code'>{r['code']}</td>"
             f"<td class='num'>{_fmt(r['close'], 0)}</td>"
@@ -281,8 +328,19 @@ def main():
     with st.sidebar:
         st.markdown("### ⚙️ Pengaturan")
         top_n = st.slider("Jumlah saham terlikuid", 50, 300, 200, step=25,
-                          help="Diranking dari median nilai transaksi 60 hari (data aktual)")
-        threshold = st.slider("Ambang skor Top Picks", 0.0, 10.0, 5.0, step=0.5)
+                          help="Diranking dari rata-rata nilai transaksi 20 hari (data aktual)")
+        combo_sel = st.multiselect(
+            "Kombinasi sinyal dipakai", [label for _, label in COMBOS],
+            default=[label for _, label in COMBOS],
+            help="Skor & Top Picks hanya menghitung kombinasi yang dipilih (+2,5 per kombinasi)",
+        )
+        active = tuple(k for k, label in COMBOS if label in combo_sel)
+        if not active:
+            st.caption("⚠️ Tidak ada kombinasi dipilih — memakai keempatnya.")
+            active = COMBO_KEYS
+        max_score = 2.5 * len(active)
+        threshold = st.slider("Ambang skor Top Picks", 0.0, max_score,
+                              min(5.0, max_score), step=0.5)
         min_price = st.number_input("Harga minimum (Rp)", 50, 10000, 50, step=50)
         with st.expander("Universe kustom"):
             uni_text = st.text_area("Kode saham (tanpa .JK)", " ".join(UNIVERSE),
@@ -323,7 +381,7 @@ def main():
         st.stop()
 
     failed = len(symbols) - len(prices)
-    table = build_screen(prices, top_n, float(min_price))
+    table = build_screen(prices, top_n, float(min_price), active)
     if table.empty:
         st.warning("Tidak ada saham yang lolos filter dasar (harga minimum / panjang data).")
         st.stop()
@@ -340,9 +398,10 @@ def main():
 
     # ---------- Top Picks ----------
     st.subheader(f"🏆 Top Picks (skor ≥ {threshold:g})")
-    st.caption("Chart yang sedang berada dalam kondisi teknikal terkuat menurut aturan skor.")
+    st.caption("Kandidat rebound: saham jenuh jual yang mulai menunjukkan tanda "
+               "akumulasi / pembalikan momentum menurut aturan skor.")
     if len(picks):
-        st.markdown(picks_table_html(picks), unsafe_allow_html=True)
+        st.markdown(picks_table_html(picks, active), unsafe_allow_html=True)
     else:
         st.info("Belum ada saham yang lolos ambang skor. Turunkan ambang di sidebar.")
 
@@ -352,9 +411,10 @@ def main():
         "Kode": table["code"],
         "Close": table["close"],
         "1D%": table["ret1"], "5D%": table["ret5"], "20D%": table["ret20"],
-        "RSI": table["rsi"], "Vol×": table["vol_ratio"],
+        "RSI": table["rsi"], "Stoch": table["stoch"], "MFI": table["mfi"],
+        "Vol×": table["vol_ratio"],
         "Liq (Rp M)": table["liq"] / 1e9,
-        "Sinyal": table.apply(signal_text, axis=1),
+        "Sinyal": table.apply(lambda r: signal_text(r, active), axis=1),
         "Skor": table["score"],
     })
     st.dataframe(
@@ -365,9 +425,12 @@ def main():
             "5D%": st.column_config.NumberColumn(format="%+.1f%%"),
             "20D%": st.column_config.NumberColumn(format="%+.1f%%"),
             "RSI": st.column_config.NumberColumn(format="%.0f"),
+            "Stoch": st.column_config.NumberColumn(format="%.0f"),
+            "MFI": st.column_config.NumberColumn(format="%.0f"),
             "Vol×": st.column_config.NumberColumn(format="%.1f"),
             "Liq (Rp M)": st.column_config.NumberColumn(format="%.1f"),
-            "Skor": st.column_config.ProgressColumn(format="%.1f", min_value=0, max_value=11.5),
+            "Skor": st.column_config.ProgressColumn(format="%.1f", min_value=0,
+                                                    max_value=max_score),
         },
     )
     st.download_button(
@@ -377,13 +440,15 @@ def main():
 
     # ---------- Catatan ----------
     st.caption(
-        "**Skor**: TREN NAIK (close>MA20>MA50) +2 · di atas MA200 +1 · BREAKOUT 20D +2 · "
-        "DEKAT 52W HIGH +1,5 · GOLDEN CROSS (≤10 hari) +1,5 · MACD CROSS (≤3 hari) +1 · "
-        "VOL SPIKE ≥1,8× +1 · RSI 50–70 +1 · return 20d positif +0,5 · "
-        "penalti RSI>80 −1, di bawah MA200 −1."
+        "**Skor**: tiap kombinasi terpilih +2,5 (maks 2,5 × jumlah kombinasi dipilih) · "
+        "**Kombo 1** RSI ≤ 30 & Stochastic %K < 20 (jenuh jual ganda) · "
+        "**Kombo 2** low menyentuh Bollinger bawah (20, 2σ, ≤5 hari) & OBV naik (akumulasi) · "
+        "**Kombo 3** divergensi bullish RSI & histogram MACD memendek (momentum berbalik) · "
+        "**Kombo 4** MFI < 20 & lonjakan volume ≥ 1,8× (kelelahan jual)."
     )
     st.caption(
-        "Liq = median nilai transaksi harian 60 hari. Data EOD/delayed dari Yahoo Finance "
+        "Liq = rata-rata nilai transaksi harian 20 hari (hari tanpa transaksi dikecualikan). "
+        "Data EOD/delayed dari Yahoo Finance "
         "(tidak resmi, untuk riset pribadi). Sinyal teknikal adalah kondisi chart, **bukan "
         "rekomendasi atau nasihat investasi** — lakukan analisis lanjutan sebelum mengambil keputusan."
     )

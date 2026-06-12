@@ -5,10 +5,12 @@ berjalan sebagai web app Streamlit dengan data riil dari Yahoo Finance
 (ticker `.JK`, end-of-day).
 
 ## Fitur
-- Ranking **likuiditas aktual**: median nilai transaksi 60 hari, ambil top-N (default 200)
-- Sinyal teknikal: tren naik (close>MA20>MA50), posisi vs MA200, breakout high 20 hari,
-  dekat 52-week high, golden cross, MACD cross, volume spike, zona RSI
-- Skor komposit + bagian **Top Picks** untuk pengecekan tiap pagi
+- Ranking **likuiditas aktual**: rata-rata nilai transaksi 20 hari, ambil top-N (default 200)
+- Sinyal teknikal: 4 kombinasi rebound — (1) RSI ≤ 30 + Stochastic %K < 20,
+  (2) sentuh Bollinger bawah + OBV naik, (3) divergensi bullish RSI + histogram
+  MACD memendek, (4) MFI < 20 + lonjakan volume (kelelahan jual)
+- Skor komposit + bagian **Top Picks** untuk pengecekan tiap pagi;
+  kombinasi yang dipakai bisa dipilih (1–4) lewat sidebar
 - Tabel lengkap yang bisa di-sort, export CSV, universe kustom lewat sidebar
 - Cache data 4 jam (dibagi ke semua pengunjung) supaya Yahoo tidak di-spam
 

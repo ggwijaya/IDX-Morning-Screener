@@ -33,3 +33,9 @@ Key invariants:
 - Pure computation (indicators, scoring, parsing) lives at module level; only `main()` touches `streamlit`/`yfinance` imports. Keep new logic testable by following this split.
 - Adding a signal means touching three places: the `sig` dict and score formula in `analyze_one`, the `BADGES` list (for display), and the score caption.
 - Number formatting uses Indonesian conventions (`_fmt` swaps `.`/`,`).
+
+## Git Workflow
+- Always develop directly on the dev branch. Never create feature branches.
+Before making changes, ensure you are on dev: git checkout dev && git pull origin dev
+- Commit and push directly to dev: git push -u origin dev
+- Do not open pull requests unless explicitly asked.

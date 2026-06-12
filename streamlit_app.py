@@ -28,7 +28,7 @@ import pandas as pd
 BATCH = 50            # ukuran batch download yfinance
 PERIOD = "2y"         # periode data harian
 MIN_BARS = 120        # minimal candle agar dianalisis
-LIQ_WINDOW = 60       # window median nilai transaksi (hari)
+LIQ_WINDOW = 20       # window rata-rata nilai transaksi (hari)
 CACHE_TTL = 4 * 3600  # cache data 4 jam (data EOD, tak perlu lebih sering)
 
 # Universe kandidat (~195 saham IDX yang umumnya aktif). Bisa basi karena
@@ -149,8 +149,11 @@ def analyze_one(df: pd.DataFrame, min_price: float) -> dict | None:
         prev = c.iloc[-1 - n]
         return (close / prev - 1) * 100 if prev else np.nan
 
-    value = (c * v).tail(LIQ_WINDOW)
-    liq = float(value.median()) if len(value) else 0.0
+    # Hari tanpa transaksi (volume 0/NaN dari Yahoo) dikecualikan agar
+    # rata-rata tidak tertarik ke bawah oleh baris hantu/libur.
+    value = (c * v)
+    value = value[v > 0].tail(LIQ_WINDOW)
+    liq = float(value.mean()) if len(value) else 0.0
 
     prior20_high = h.iloc[-21:-1].max() if len(h) >= 21 else np.nan
     hi52 = c.rolling(252, min_periods=120).max().iloc[-1]
@@ -281,7 +284,7 @@ def main():
     with st.sidebar:
         st.markdown("### ⚙️ Pengaturan")
         top_n = st.slider("Jumlah saham terlikuid", 50, 300, 200, step=25,
-                          help="Diranking dari median nilai transaksi 60 hari (data aktual)")
+                          help="Diranking dari rata-rata nilai transaksi 20 hari (data aktual)")
         threshold = st.slider("Ambang skor Top Picks", 0.0, 10.0, 5.0, step=0.5)
         min_price = st.number_input("Harga minimum (Rp)", 50, 10000, 50, step=50)
         with st.expander("Universe kustom"):
@@ -383,7 +386,8 @@ def main():
         "penalti RSI>80 −1, di bawah MA200 −1."
     )
     st.caption(
-        "Liq = median nilai transaksi harian 60 hari. Data EOD/delayed dari Yahoo Finance "
+        "Liq = rata-rata nilai transaksi harian 20 hari (hari tanpa transaksi dikecualikan). "
+        "Data EOD/delayed dari Yahoo Finance "
         "(tidak resmi, untuk riset pribadi). Sinyal teknikal adalah kondisi chart, **bukan "
         "rekomendasi atau nasihat investasi** — lakukan analisis lanjutan sebelum mengambil keputusan."
     )

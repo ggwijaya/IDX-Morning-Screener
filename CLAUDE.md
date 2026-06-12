@@ -26,7 +26,7 @@ The app is a pipeline, all in `streamlit_app.py`:
 1. **Universe** — the `UNIVERSE` constant embeds ~195 candidate tickers (overridable via the sidebar "Universe kustom" expander; `parse_universe` normalizes the text). Dead/delisted tickers are silently skipped downstream.
 2. **Fetch** — `fetch_batch` (defined inside `main()`) downloads OHLCV in batches of `BATCH=50` via `yf.download`, with 3 retries against Yahoo rate limits (HTTP 429). It's wrapped in `@st.cache_data(ttl=CACHE_TTL)` so data is cached 4 hours and shared across all visitors — this is deliberate to avoid hammering Yahoo; don't shorten the TTL or bypass the cache.
 3. **Analyze** — `analyze_one` computes indicators (RSI, MACD, SMAs — pure pandas, no TA library) and a boolean signal dict per stock, plus a weighted composite score. The score weights are documented in the caption near the end of `main()`; if you change weights, update that caption and the `ProgressColumn` `max_value` to match.
-4. **Rank & display** — `build_screen` ranks by liquidity (60-day median transaction value), keeps top-N, then sorts by score. `main()` renders Top Picks as hand-built HTML (`picks_table_html`, styled by the `CSS` constant and `BADGES` list) plus a sortable `st.dataframe` and CSV export.
+4. **Rank & display** — `build_screen` ranks by liquidity (20-day mean transaction value, zero-volume days excluded), keeps top-N, then sorts by score. `main()` renders Top Picks as hand-built HTML (`picks_table_html`, styled by the `CSS` constant and `BADGES` list) plus a sortable `st.dataframe` and CSV export.
 
 Key invariants:
 

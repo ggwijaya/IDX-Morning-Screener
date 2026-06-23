@@ -37,16 +37,19 @@ BT_HIT_PCT = 1.0      # HIT bila high hari berikutnya >= close H-1 + 1%
 BT_MIN_PRICE = 50.0
 BT_TOP_N = 200
 
-# Portal berita: feed RSS finansial publik (Kontan & Bisnis). Hanya
-# judul/ringkasan/link yang ditampilkan — isi penuh tetap di situs sumber
-# (hormati hak cipta). Feed yang gagal/diblokir otomatis dilewati.
+# Portal berita: feed RSS finansial publik (Kontan, Bisnis, CNBC Indonesia).
+# Hanya judul/ringkasan/link yang ditampilkan — isi penuh tetap di situs
+# sumber (hormati hak cipta). Feed yang gagal/diblokir otomatis dilewati.
 NEWS_TTL = 15 * 60    # cache berita 15 menit (lebih segar dari data harga)
-NEWS_MAX = 45         # maksimal kartu berita ditampilkan
+NEWS_MAX = 80         # maksimal kartu berita ditampilkan
+NEWS_WINDOW_H = 24    # hanya tampilkan berita <= 24 jam terakhir
 NEWS_FEEDS = [
     ("Kontan · Investasi", "https://investasi.kontan.co.id/rss"),
     ("Kontan · Keuangan", "https://keuangan.kontan.co.id/rss"),
     ("Bisnis · Market", "https://market.bisnis.com/rss"),
     ("Bisnis · Finansial", "https://finansial.bisnis.com/rss"),
+    ("CNBC · Market", "https://www.cnbcindonesia.com/market/rss"),
+    ("CNBC · Investment", "https://www.cnbcindonesia.com/investment/rss"),
 ]
 
 # Universe kandidat (~195 saham IDX yang umumnya aktif). Bisa basi karena
@@ -445,8 +448,14 @@ def normalize_news(source: str, entries: list) -> list[dict]:
     return items
 
 
-def merge_news(feeds: list[tuple[str, list]], limit: int = NEWS_MAX) -> list[dict]:
-    """Gabung banyak feed, buang duplikat link, urutkan terbaru dulu, batasi N."""
+def merge_news(feeds: list[tuple[str, list]], limit: int = NEWS_MAX,
+               within_hours: int | None = None,
+               now: datetime | None = None) -> list[dict]:
+    """Gabung banyak feed, buang duplikat link, urutkan terbaru dulu, batasi N.
+
+    Bila `within_hours` diberikan, hanya berita dalam jendela jam tsb yang
+    disimpan. Entri tanpa tanggal terbit (sebagian feed mengabaikannya) tetap
+    disertakan karena feed RSS lazimnya hanya memuat item terbaru."""
     seen, merged = set(), []
     for source, entries in feeds:
         for item in normalize_news(source, entries):
@@ -454,6 +463,11 @@ def merge_news(feeds: list[tuple[str, list]], limit: int = NEWS_MAX) -> list[dic
                 continue
             seen.add(item["link"])
             merged.append(item)
+    if within_hours is not None:
+        now = now or datetime.now(timezone.utc)
+        cutoff = now.timestamp() - within_hours * 3600
+        merged = [m for m in merged
+                  if m["dt"] is None or m["dt"].timestamp() >= cutoff]
     merged.sort(key=lambda x: x["dt"] or datetime.min.replace(tzinfo=timezone.utc),
                 reverse=True)
     return merged[:limit]
@@ -536,7 +550,7 @@ def main():
                     raw.append((source, list(parsed.entries)))
             except Exception:
                 pass
-        return merge_news(raw, NEWS_MAX)
+        return merge_news(raw, NEWS_MAX, within_hours=NEWS_WINDOW_H)
 
     # ---------- Sidebar ----------
     with st.sidebar:
@@ -578,11 +592,11 @@ def main():
 
     tab_screen, tab_news = st.tabs(["📈 Screener", "📰 Berita finansial"])
 
-    # ---------- Tab Berita (RSS Kontan & Bisnis) ----------
+    # ---------- Tab Berita (RSS Kontan, Bisnis, CNBC Indonesia) ----------
     with tab_news:
-        st.subheader("📰 Berita finansial terkini")
-        st.caption("Agregasi judul dari RSS Kontan & Bisnis. Klik judul untuk "
-                   "membaca artikel penuh di situs sumbernya.")
+        st.subheader(f"📰 Berita finansial · {NEWS_WINDOW_H} jam terakhir")
+        st.caption("Agregasi judul dari RSS Kontan, Bisnis & CNBC Indonesia. "
+                   "Klik judul untuk membaca artikel penuh di situs sumbernya.")
         bc1, _ = st.columns([1, 3])
         if bc1.button("🔄 Segarkan berita", use_container_width=True,
                       help="Hapus cache & unduh ulang feed RSS"):
@@ -597,11 +611,11 @@ def main():
             st.caption(f"{len(news)} berita · sumber: {srcs}{tail}")
             st.markdown(news_cards_html(news, tickers), unsafe_allow_html=True)
         else:
-            st.info("Belum ada berita yang bisa diambil — feed sumber mungkin "
-                    "sedang tidak tersedia. Coba klik **Segarkan berita**.")
+            st.info(f"Belum ada berita dalam {NEWS_WINDOW_H} jam terakhir — feed "
+                    "sumber mungkin sedang tidak tersedia. Coba **Segarkan berita**.")
         st.caption(
-            "Berita disediakan oleh Kontan & Bisnis; ditampilkan sebagai "
-            "ringkasan/tautan dengan hak cipta tetap pada penerbit. "
+            "Berita disediakan oleh Kontan, Bisnis & CNBC Indonesia; ditampilkan "
+            "sebagai ringkasan/tautan dengan hak cipta tetap pada penerbit. "
             f"Di-cache {NEWS_TTL // 60} menit & dibagi ke semua pengunjung. "
             "Tag kode (mis. BBRI) terdeteksi otomatis dari judul."
         )

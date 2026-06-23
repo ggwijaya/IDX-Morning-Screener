@@ -37,6 +37,18 @@ BT_HIT_PCT = 1.0      # HIT bila high hari berikutnya >= close H-1 + 1%
 BT_MIN_PRICE = 50.0
 BT_TOP_N = 200
 
+# Portal berita: feed RSS finansial publik (Kontan & Bisnis). Hanya
+# judul/ringkasan/link yang ditampilkan — isi penuh tetap di situs sumber
+# (hormati hak cipta). Feed yang gagal/diblokir otomatis dilewati.
+NEWS_TTL = 15 * 60    # cache berita 15 menit (lebih segar dari data harga)
+NEWS_MAX = 45         # maksimal kartu berita ditampilkan
+NEWS_FEEDS = [
+    ("Kontan · Investasi", "https://investasi.kontan.co.id/rss"),
+    ("Kontan · Keuangan", "https://keuangan.kontan.co.id/rss"),
+    ("Bisnis · Market", "https://market.bisnis.com/rss"),
+    ("Bisnis · Finansial", "https://finansial.bisnis.com/rss"),
+]
+
 # Universe kandidat (~195 saham IDX yang umumnya aktif). Bisa basi karena
 # merger/delisting/IPO — saham tanpa data otomatis dilewati, dan ranking
 # likuiditas dihitung dari data AKTUAL. Bisa di-override lewat sidebar.
@@ -110,6 +122,20 @@ table.picks td.sig {white-space:normal;}
   color:#dfe9e6;margin:0 18px;}
 .mq-hit{color:#3ddc97}.mq-fail{color:#ff8080}
 @keyframes mq {from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.news-card {background:#fff;border:1px solid #d7dbd4;border-left:4px solid #0a4646;
+  border-radius:8px;padding:12px 15px;margin-bottom:10px;}
+.news-card .src {display:inline-block;font-family:monospace;font-size:10px;
+  font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:#0a4646;
+  background:#dcebe7;padding:2px 7px;border-radius:4px;}
+.news-card .time {font-family:monospace;font-size:11px;color:#8a9088;margin-left:8px;}
+.news-card .title {display:block;margin:7px 0 4px;font-size:15px;font-weight:600;
+  color:#16302e;text-decoration:none;line-height:1.35;}
+.news-card .title:hover {color:#0a4646;text-decoration:underline;}
+.news-card .summary {font-size:13px;color:#55615c;line-height:1.45;margin:0;}
+.news-card .tickers {margin-top:7px;}
+.news-card .tk {display:inline-block;font-family:monospace;font-size:10px;
+  font-weight:700;color:#7a5b12;background:#f0e3c4;padding:1px 6px;border-radius:4px;
+  margin:0 4px 0 0;}
 </style>
 """
 
@@ -344,6 +370,126 @@ def parse_universe(text: str) -> list[str]:
 
 
 # ----------------------------------------------------------------------------
+# PORTAL BERITA (parsing murni; fetch RSS dilakukan di main())
+# ----------------------------------------------------------------------------
+import re
+from datetime import timezone
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def _strip_html(text: str, limit: int = 220) -> str:
+    """Buang tag HTML dari ringkasan RSS dan rapikan spasi."""
+    if not text:
+        return ""
+    clean = _WS_RE.sub(" ", _TAG_RE.sub(" ", text)).strip()
+    return clean[:limit].rstrip() + "…" if len(clean) > limit else clean
+
+
+def _entry_dt(entry) -> datetime | None:
+    """Ambil waktu terbit (UTC) dari struct_time feedparser bila ada."""
+    st = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not st:
+        return None
+    try:
+        return datetime(*st[:6], tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _time_ago(dt: datetime | None, now: datetime | None = None) -> str:
+    if dt is None:
+        return ""
+    now = now or datetime.now(timezone.utc)
+    secs = (now - dt).total_seconds()
+    if secs < 0:
+        return "baru saja"
+    mins = int(secs // 60)
+    if mins < 1:
+        return "baru saja"
+    if mins < 60:
+        return f"{mins} menit lalu"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours} jam lalu"
+    days = hours // 24
+    return f"{days} hari lalu"
+
+
+def detect_tickers(text: str, universe: list[str]) -> list[str]:
+    """Cari kode saham dari universe yang disebut utuh di judul berita."""
+    if not text or not universe:
+        return []
+    upper = text.upper()
+    found = [t for t in universe if re.search(rf"\b{re.escape(t)}\b", upper)]
+    return sorted(set(found))
+
+
+def normalize_news(source: str, entries: list) -> list[dict]:
+    """Ubah entri feedparser jadi dict seragam; entri tanpa judul/link dibuang."""
+    items = []
+    for e in entries:
+        title = (e.get("title") or "").strip()
+        link = (e.get("link") or "").strip()
+        if not title or not link:
+            continue
+        dt = _entry_dt(e)
+        items.append({
+            "source": source,
+            "title": title,
+            "link": link,
+            "summary": _strip_html(e.get("summary") or e.get("description") or ""),
+            "dt": dt,
+        })
+    return items
+
+
+def merge_news(feeds: list[tuple[str, list]], limit: int = NEWS_MAX) -> list[dict]:
+    """Gabung banyak feed, buang duplikat link, urutkan terbaru dulu, batasi N."""
+    seen, merged = set(), []
+    for source, entries in feeds:
+        for item in normalize_news(source, entries):
+            if item["link"] in seen:
+                continue
+            seen.add(item["link"])
+            merged.append(item)
+    merged.sort(key=lambda x: x["dt"] or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True)
+    return merged[:limit]
+
+
+def _esc(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def news_cards_html(items: list[dict], universe: list[str] | None = None,
+                    now: datetime | None = None) -> str:
+    universe = universe or []
+    cards = []
+    for it in items:
+        tickers = detect_tickers(it["title"], universe)
+        tk_html = ""
+        if tickers:
+            tk_html = ('<div class="tickers">'
+                       + "".join(f'<span class="tk">{t}</span>' for t in tickers)
+                       + "</div>")
+        ago = _time_ago(it["dt"], now)
+        time_html = f'<span class="time">{ago}</span>' if ago else ""
+        summary = (f'<p class="summary">{_esc(it["summary"])}</p>'
+                   if it["summary"] else "")
+        cards.append(
+            '<div class="news-card">'
+            f'<span class="src">{_esc(it["source"])}</span>{time_html}'
+            f'<a class="title" href="{_esc(it["link"])}" target="_blank" '
+            f'rel="noopener noreferrer">{_esc(it["title"])}</a>'
+            f'{summary}{tk_html}</div>'
+        )
+    return "".join(cards)
+
+
+# ----------------------------------------------------------------------------
 # APLIKASI STREAMLIT
 # ----------------------------------------------------------------------------
 def main():
@@ -376,6 +522,21 @@ def main():
             except Exception:
                 pass
         return out
+
+    @st.cache_data(ttl=NEWS_TTL, show_spinner=False)
+    def fetch_news(feeds: tuple) -> list:
+        """Unduh & parse RSS finansial. Feed yang gagal dilewati; mengembalikan
+        list dict siap render (di-cache NEWS_TTL & dibagi ke semua pengunjung)."""
+        import feedparser
+        raw = []
+        for source, url in feeds:
+            try:
+                parsed = feedparser.parse(url)
+                if getattr(parsed, "entries", None):
+                    raw.append((source, list(parsed.entries)))
+            except Exception:
+                pass
+        return merge_news(raw, NEWS_MAX)
 
     # ---------- Sidebar ----------
     with st.sidebar:
@@ -415,107 +576,139 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ---------- Unduh data (batched + cached) ----------
-    batches = [symbols[i:i + BATCH] for i in range(0, len(symbols), BATCH)]
-    prog = st.progress(0.0, text="Menyiapkan data harga …")
-    prices: dict[str, pd.DataFrame] = {}
-    for i, b in enumerate(batches):
-        prices.update(fetch_batch(tuple(b)))
-        done = min((i + 1) * BATCH, len(symbols))
-        prog.progress((i + 1) / len(batches), text=f"Menyiapkan data … {done}/{len(symbols)} saham")
-    prog.empty()
+    tab_screen, tab_news = st.tabs(["📈 Screener", "📰 Berita finansial"])
 
-    if not prices:
-        st.error(
-            "Tidak ada data yang berhasil diunduh dari Yahoo Finance. Biasanya ini karena "
-            "rate limit sementara dari sisi Yahoo. Tunggu beberapa menit lalu klik "
-            "**Tarik ulang data** di sidebar."
-        )
-        st.stop()
-
-    # ---------- Running text: backtest top picks H-1 ----------
-    bt = backtest_yesterday(prices)
-    st.markdown(marquee_html(bt), unsafe_allow_html=True)
-    if bt:
-        n_hit = sum(ok for _, ok in bt)
+    # ---------- Tab Berita (RSS Kontan & Bisnis) ----------
+    with tab_news:
+        st.subheader("📰 Berita finansial terkini")
+        st.caption("Agregasi judul dari RSS Kontan & Bisnis. Klik judul untuk "
+                   "membaca artikel penuh di situs sumbernya.")
+        bc1, _ = st.columns([1, 3])
+        if bc1.button("🔄 Segarkan berita", use_container_width=True,
+                      help="Hapus cache & unduh ulang feed RSS"):
+            fetch_news.clear()
+            st.rerun()
+        with st.spinner("Mengambil berita …"):
+            news = fetch_news(tuple(NEWS_FEEDS))
+        if news:
+            newest = max((n["dt"] for n in news if n["dt"]), default=None)
+            srcs = ", ".join(sorted({n["source"].split(" · ")[0] for n in news}))
+            tail = f" · terbaru {_time_ago(newest)}" if newest else ""
+            st.caption(f"{len(news)} berita · sumber: {srcs}{tail}")
+            st.markdown(news_cards_html(news, tickers), unsafe_allow_html=True)
+        else:
+            st.info("Belum ada berita yang bisa diambil — feed sumber mungkin "
+                    "sedang tidak tersedia. Coba klik **Segarkan berita**.")
         st.caption(
-            f"Backtest top picks hari sebelumnya (skor ≥ {BT_THRESHOLD:g}, 4 kombo): "
-            f"{n_hit}/{len(bt)} HIT — HIT bila high hari berikutnya ≥ "
-            f"+{BT_HIT_PCT:g}% dari close saat pick."
+            "Berita disediakan oleh Kontan & Bisnis; ditampilkan sebagai "
+            "ringkasan/tautan dengan hak cipta tetap pada penerbit. "
+            f"Di-cache {NEWS_TTL // 60} menit & dibagi ke semua pengunjung. "
+            "Tag kode (mis. BBRI) terdeteksi otomatis dari judul."
         )
 
-    failed = len(symbols) - len(prices)
-    table = build_screen(prices, top_n, float(min_price), active)
-    if table.empty:
-        st.warning("Tidak ada saham yang lolos filter dasar (harga minimum / panjang data).")
-        st.stop()
+    # ---------- Tab Screener ----------
+    with tab_screen:
+        # ---------- Unduh data (batched + cached) ----------
+        batches = [symbols[i:i + BATCH] for i in range(0, len(symbols), BATCH)]
+        prog = st.progress(0.0, text="Menyiapkan data harga …")
+        prices: dict[str, pd.DataFrame] = {}
+        for i, b in enumerate(batches):
+            prices.update(fetch_batch(tuple(b)))
+            done = min((i + 1) * BATCH, len(symbols))
+            prog.progress((i + 1) / len(batches), text=f"Menyiapkan data … {done}/{len(symbols)} saham")
+        prog.empty()
 
-    picks = table[table["score"] >= threshold]
-    last_date = max(r["last_date"] for _, r in table.iterrows())
+        if not prices:
+            st.error(
+                "Tidak ada data yang berhasil diunduh dari Yahoo Finance. Biasanya ini karena "
+                "rate limit sementara dari sisi Yahoo. Tunggu beberapa menit lalu klik "
+                "**Tarik ulang data** di sidebar."
+            )
+            st.stop()
 
-    # ---------- Ringkasan ----------
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Saham discreen", f"{len(table)}")
-    c2.metric("Top picks", f"{len(picks)}", help=f"Skor ≥ {threshold:g}")
-    c3.metric("Data terakhir", pd.Timestamp(last_date).strftime("%d %b %Y"))
-    c4.metric("Gagal diunduh", f"{failed}", help="Kode delisting/berganti otomatis dilewati")
+        # ---------- Running text: backtest top picks H-1 ----------
+        bt = backtest_yesterday(prices)
+        st.markdown(marquee_html(bt), unsafe_allow_html=True)
+        if bt:
+            n_hit = sum(ok for _, ok in bt)
+            st.caption(
+                f"Backtest top picks hari sebelumnya (skor ≥ {BT_THRESHOLD:g}, 4 kombo): "
+                f"{n_hit}/{len(bt)} HIT — HIT bila high hari berikutnya ≥ "
+                f"+{BT_HIT_PCT:g}% dari close saat pick."
+            )
 
-    # ---------- Top Picks ----------
-    st.subheader(f"🏆 Top Picks (skor ≥ {threshold:g})")
-    st.caption("Kandidat rebound: saham jenuh jual yang mulai menunjukkan tanda "
-               "akumulasi / pembalikan momentum menurut aturan skor.")
-    if len(picks):
-        st.markdown(picks_table_html(picks, active), unsafe_allow_html=True)
-    else:
-        st.info("Belum ada saham yang lolos ambang skor. Turunkan ambang di sidebar.")
+        failed = len(symbols) - len(prices)
+        table = build_screen(prices, top_n, float(min_price), active)
+        if table.empty:
+            st.warning("Tidak ada saham yang lolos filter dasar (harga minimum / panjang data).")
+            st.stop()
 
-    # ---------- Tabel lengkap ----------
-    st.subheader("📊 Semua hasil")
-    disp = pd.DataFrame({
-        "Kode": table["code"],
-        "Close": table["close"],
-        "1D%": table["ret1"], "5D%": table["ret5"], "20D%": table["ret20"],
-        "RSI": table["rsi"], "Stoch": table["stoch"], "MFI": table["mfi"],
-        "Vol×": table["vol_ratio"],
-        "Liq (Rp M)": table["liq"] / 1e9,
-        "Sinyal": table.apply(lambda r: signal_text(r, active), axis=1),
-        "Skor": table["score"],
-    })
-    st.dataframe(
-        disp, use_container_width=True, height=560, hide_index=True,
-        column_config={
-            "Close": st.column_config.NumberColumn(format="%.0f"),
-            "1D%": st.column_config.NumberColumn(format="%+.1f%%"),
-            "5D%": st.column_config.NumberColumn(format="%+.1f%%"),
-            "20D%": st.column_config.NumberColumn(format="%+.1f%%"),
-            "RSI": st.column_config.NumberColumn(format="%.0f"),
-            "Stoch": st.column_config.NumberColumn(format="%.0f"),
-            "MFI": st.column_config.NumberColumn(format="%.0f"),
-            "Vol×": st.column_config.NumberColumn(format="%.1f"),
-            "Liq (Rp M)": st.column_config.NumberColumn(format="%.1f"),
-            "Skor": st.column_config.ProgressColumn(format="%.1f", min_value=0,
-                                                    max_value=max_score),
-        },
-    )
-    st.download_button(
-        "⬇️ Download CSV", disp.to_csv(index=False).encode("utf-8"),
-        file_name=f"idx-screen-{datetime.now():%Y%m%d}.csv", mime="text/csv",
-    )
+        picks = table[table["score"] >= threshold]
+        last_date = max(r["last_date"] for _, r in table.iterrows())
 
-    # ---------- Catatan ----------
-    st.caption(
-        "**Skor**: tiap kombinasi terpilih +2,5 (maks 2,5 × jumlah kombinasi dipilih) · "
-        "**Kombo 1** RSI ≤ 30 & Stochastic %K < 20 (jenuh jual ganda) · "
-        "**Kombo 2** low menyentuh Bollinger bawah (20, 2σ, ≤5 hari) & OBV naik (akumulasi) · "
-        "**Kombo 3** divergensi bullish RSI & histogram MACD memendek (momentum berbalik) · "
-        "**Kombo 4** MFI < 20 & lonjakan volume ≥ 1,8× (kelelahan jual)."
-    )
-    st.caption(
-        "Liq = rata-rata nilai transaksi harian 20 hari (hari tanpa transaksi dikecualikan). "
-        "Data EOD/delayed dari Yahoo Finance "
-        "(tidak resmi, untuk riset pribadi). Sinyal teknikal adalah kondisi chart, **bukan "
-        "rekomendasi atau nasihat investasi** — lakukan analisis lanjutan sebelum mengambil keputusan."
-    )
+        # ---------- Ringkasan ----------
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Saham discreen", f"{len(table)}")
+        c2.metric("Top picks", f"{len(picks)}", help=f"Skor ≥ {threshold:g}")
+        c3.metric("Data terakhir", pd.Timestamp(last_date).strftime("%d %b %Y"))
+        c4.metric("Gagal diunduh", f"{failed}", help="Kode delisting/berganti otomatis dilewati")
+
+        # ---------- Top Picks ----------
+        st.subheader(f"🏆 Top Picks (skor ≥ {threshold:g})")
+        st.caption("Kandidat rebound: saham jenuh jual yang mulai menunjukkan tanda "
+                   "akumulasi / pembalikan momentum menurut aturan skor.")
+        if len(picks):
+            st.markdown(picks_table_html(picks, active), unsafe_allow_html=True)
+        else:
+            st.info("Belum ada saham yang lolos ambang skor. Turunkan ambang di sidebar.")
+
+        # ---------- Tabel lengkap ----------
+        st.subheader("📊 Semua hasil")
+        disp = pd.DataFrame({
+            "Kode": table["code"],
+            "Close": table["close"],
+            "1D%": table["ret1"], "5D%": table["ret5"], "20D%": table["ret20"],
+            "RSI": table["rsi"], "Stoch": table["stoch"], "MFI": table["mfi"],
+            "Vol×": table["vol_ratio"],
+            "Liq (Rp M)": table["liq"] / 1e9,
+            "Sinyal": table.apply(lambda r: signal_text(r, active), axis=1),
+            "Skor": table["score"],
+        })
+        st.dataframe(
+            disp, use_container_width=True, height=560, hide_index=True,
+            column_config={
+                "Close": st.column_config.NumberColumn(format="%.0f"),
+                "1D%": st.column_config.NumberColumn(format="%+.1f%%"),
+                "5D%": st.column_config.NumberColumn(format="%+.1f%%"),
+                "20D%": st.column_config.NumberColumn(format="%+.1f%%"),
+                "RSI": st.column_config.NumberColumn(format="%.0f"),
+                "Stoch": st.column_config.NumberColumn(format="%.0f"),
+                "MFI": st.column_config.NumberColumn(format="%.0f"),
+                "Vol×": st.column_config.NumberColumn(format="%.1f"),
+                "Liq (Rp M)": st.column_config.NumberColumn(format="%.1f"),
+                "Skor": st.column_config.ProgressColumn(format="%.1f", min_value=0,
+                                                        max_value=max_score),
+            },
+        )
+        st.download_button(
+            "⬇️ Download CSV", disp.to_csv(index=False).encode("utf-8"),
+            file_name=f"idx-screen-{datetime.now():%Y%m%d}.csv", mime="text/csv",
+        )
+
+        # ---------- Catatan ----------
+        st.caption(
+            "**Skor**: tiap kombinasi terpilih +2,5 (maks 2,5 × jumlah kombinasi dipilih) · "
+            "**Kombo 1** RSI ≤ 30 & Stochastic %K < 20 (jenuh jual ganda) · "
+            "**Kombo 2** low menyentuh Bollinger bawah (20, 2σ, ≤5 hari) & OBV naik (akumulasi) · "
+            "**Kombo 3** divergensi bullish RSI & histogram MACD memendek (momentum berbalik) · "
+            "**Kombo 4** MFI < 20 & lonjakan volume ≥ 1,8× (kelelahan jual)."
+        )
+        st.caption(
+            "Liq = rata-rata nilai transaksi harian 20 hari (hari tanpa transaksi dikecualikan). "
+            "Data EOD/delayed dari Yahoo Finance "
+            "(tidak resmi, untuk riset pribadi). Sinyal teknikal adalah kondisi chart, **bukan "
+            "rekomendasi atau nasihat investasi** — lakukan analisis lanjutan sebelum mengambil keputusan."
+        )
 
 
 if not os.environ.get("SCREENER_TEST"):

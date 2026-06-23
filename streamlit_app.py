@@ -51,6 +51,13 @@ NEWS_FEEDS = [
     ("CNBC · Market", "https://www.cnbcindonesia.com/market/rss"),
     ("CNBC · Investment", "https://www.cnbcindonesia.com/investment/rss"),
 ]
+# Kode emiten yang juga kata umum & sering muncul kapital di judul; diabaikan
+# saat deteksi tag agar tak salah (mis. "BANK INDONESIA" bukan emiten BANK).
+NEWS_TICKER_IGNORE = frozenset({
+    "BANK", "MAIN", "BEST", "GOOD", "FILM", "RAJA", "RATU", "CITA", "MARK",
+    "CUAN", "DEWA", "COIN", "BIRD", "WIFI", "RALS", "TURI", "AISA", "AUTO",
+    "HERO", "PANI", "ROTI", "KIJA", "DOID",
+})
 
 # Universe kandidat (~195 saham IDX yang umumnya aktif). Bisa basi karena
 # merger/delisting/IPO — saham tanpa data otomatis dilewati, dan ranking
@@ -420,12 +427,17 @@ def _time_ago(dt: datetime | None, now: datetime | None = None) -> str:
     return f"{days} hari lalu"
 
 
-def detect_tickers(text: str, universe: list[str]) -> list[str]:
-    """Cari kode saham dari universe yang disebut utuh di judul berita."""
+def detect_tickers(text: str, universe: list[str],
+                   ignore: frozenset = NEWS_TICKER_IGNORE) -> list[str]:
+    """Cari kode saham dari universe yang disebut utuh di judul berita.
+
+    Cocokkan case-sensitive (kode emiten lazim ditulis kapital, mis. BBRI)
+    agar kata biasa berhuruf kecil tidak salah ditandai; kode yang juga kata
+    umum (`ignore`) dilewati."""
     if not text or not universe:
         return []
-    upper = text.upper()
-    found = [t for t in universe if re.search(rf"\b{re.escape(t)}\b", upper)]
+    found = [t for t in universe
+             if t not in ignore and re.search(rf"\b{re.escape(t)}\b", text)]
     return sorted(set(found))
 
 
